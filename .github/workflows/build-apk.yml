@@ -11,27 +11,24 @@ permissions:
   contents: read
 
 jobs:
-
   build:
-
-    name: Build Android APK
-
+    name: Build VTTS Android APK
     runs-on: ubuntu-latest
-
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
 
-      # --------------------------------------------------
-      # Checkout source
-      # --------------------------------------------------
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # Java 17
-      # --------------------------------------------------
+
+      # ============================================================
+      # JAVA 17
+      # ============================================================
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -39,16 +36,14 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # --------------------------------------------------
-      # Android SDK
-      # --------------------------------------------------
+
+      # ============================================================
+      # ANDROID SDK
+      # ============================================================
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # --------------------------------------------------
-      # Install Android SDK components
-      # --------------------------------------------------
 
       - name: Install Android SDK packages
         run: |
@@ -59,23 +54,27 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      # --------------------------------------------------
-      # Setup Gradle
-      # --------------------------------------------------
+
+      # ============================================================
+      # GRADLE
+      # ============================================================
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
 
-      # --------------------------------------------------
-      # Create AAR directory
-      # --------------------------------------------------
 
-      - name: Prepare sherpa-onnx
+      # ============================================================
+      # DOWNLOAD SHERPA-ONNX AAR
+      # ============================================================
+
+      - name: Download sherpa-onnx Android AAR
         shell: bash
         run: |
           mkdir -p app/libs
+
+          echo "Downloading sherpa-onnx 1.13.7..."
 
           curl -L --fail \
             --retry 5 \
@@ -83,21 +82,31 @@ jobs:
             -o app/libs/sherpa-onnx-1.13.7.aar \
             https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-1.13.7.aar
 
-          ls -lh app/libs/
+          echo
+          echo "AAR:"
+          ls -lh app/libs/sherpa-onnx-1.13.7.aar
 
-      # --------------------------------------------------
-      # Download your model files from your vtts release
-      # --------------------------------------------------
 
-      - name: Download Supertonic-3 model
+      # ============================================================
+      # DOWNLOAD YOUR SUPERTONIC-3 RELEASE
+      #
+      # YOUR RELEASE:
+      # https://github.com/vishala5000/vtts/releases/tag/vtts
+      # ============================================================
+
+      - name: Download Supertonic-3 INT8 model
         shell: bash
-        env:
-          REPO: ${{ github.repository }}
         run: |
 
           mkdir -p app/src/main/assets/supertonic
 
-          BASE_URL="https://github.com/${REPO}/releases/download/vtts"
+          BASE_URL="https://github.com/vishala5000/vtts/releases/download/vtts"
+
+          echo "=============================================="
+          echo "Downloading Supertonic-3 model"
+          echo "Release: vtts"
+          echo "Repository: vishala5000/vtts"
+          echo "=============================================="
 
           files=(
             "duration_predictor.int8.onnx"
@@ -111,29 +120,42 @@ jobs:
 
           for file in "${files[@]}"; do
 
-            echo "=========================================="
-            echo "Downloading: ${file}"
-            echo "=========================================="
+            echo
+            echo "----------------------------------------------"
+            echo "Downloading:"
+            echo "$file"
+            echo "----------------------------------------------"
 
-            curl -L --fail \
+            curl -L \
+              --fail \
               --retry 5 \
               --retry-delay 3 \
-              -o "app/src/main/assets/supertonic/${file}" \
-              "${BASE_URL}/${file}"
+              --connect-timeout 30 \
+              --max-time 900 \
+              -o "app/src/main/assets/supertonic/$file" \
+              "$BASE_URL/$file"
+
+            if [ ! -s "app/src/main/assets/supertonic/$file" ]; then
+              echo "ERROR: Downloaded file is missing or empty:"
+              echo "$file"
+              exit 1
+            fi
 
           done
 
-          echo
-          echo "Downloaded model files:"
-          ls -lh app/src/main/assets/supertonic/
 
-      # --------------------------------------------------
-      # Verify model files
-      # --------------------------------------------------
+      # ============================================================
+      # VERIFY MODEL
+      # ============================================================
 
-      - name: Verify model
+      - name: Verify Supertonic model
         shell: bash
         run: |
+
+          echo
+          echo "=============================================="
+          echo "VERIFYING SUPERTONIC MODEL"
+          echo "=============================================="
 
           required=(
             "duration_predictor.int8.onnx"
@@ -147,29 +169,44 @@ jobs:
 
           for file in "${required[@]}"; do
 
-            path="app/src/main/assets/supertonic/${file}"
+            path="app/src/main/assets/supertonic/$file"
 
             if [ ! -s "$path" ]; then
-              echo "ERROR: Missing or empty file:"
+              echo
+              echo "ERROR:"
               echo "$path"
+              echo "is missing or empty."
               exit 1
             fi
 
+            echo "OK: $file"
+            ls -lh "$path"
+
           done
 
+          echo
           echo "All Supertonic model files verified."
 
-      # --------------------------------------------------
-      # Show project
-      # --------------------------------------------------
 
-      - name: Show project
+      # ============================================================
+      # SHOW FILES
+      # ============================================================
+
+      - name: Show project files
+        shell: bash
         run: |
-          find . -maxdepth 5 -type f | sort
 
-      # --------------------------------------------------
-      # Build debug APK
-      # --------------------------------------------------
+          echo
+          echo "=============================================="
+          echo "PROJECT FILES"
+          echo "=============================================="
+
+          find . -maxdepth 8 -type f | sort
+
+
+      # ============================================================
+      # BUILD DEBUG APK
+      # ============================================================
 
       - name: Build debug APK
         run: |
@@ -179,26 +216,32 @@ jobs:
             clean \
             assembleDebug
 
-      # --------------------------------------------------
-      # Build release APK
-      # --------------------------------------------------
+
+      # ============================================================
+      # BUILD RELEASE APK
+      # ============================================================
 
       - name: Build release APK
         run: |
           gradle \
             --no-daemon \
             --stacktrace \
+            clean \
             assembleRelease
 
-      # --------------------------------------------------
-      # Find APKs
-      # --------------------------------------------------
 
-      - name: List APKs
+      # ============================================================
+      # SHOW APK
+      # ============================================================
+
+      - name: List generated APKs
+        shell: bash
         run: |
-          echo "=========================================="
+
+          echo
+          echo "=============================================="
           echo "DEBUG APK"
-          echo "=========================================="
+          echo "=============================================="
 
           find app/build/outputs/apk/debug \
             -type f \
@@ -206,18 +249,19 @@ jobs:
             -exec ls -lh {} \;
 
           echo
-          echo "=========================================="
+          echo "=============================================="
           echo "RELEASE APK"
-          echo "=========================================="
+          echo "=============================================="
 
           find app/build/outputs/apk/release \
             -type f \
             -name "*.apk" \
             -exec ls -lh {} \;
 
-      # --------------------------------------------------
-      # Upload debug APK
-      # --------------------------------------------------
+
+      # ============================================================
+      # UPLOAD DEBUG APK
+      # ============================================================
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -226,9 +270,10 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      # --------------------------------------------------
-      # Upload release APK
-      # --------------------------------------------------
+
+      # ============================================================
+      # UPLOAD RELEASE APK
+      # ============================================================
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
