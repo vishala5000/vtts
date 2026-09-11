@@ -14,7 +14,7 @@ jobs:
   build:
     name: Build VTTS Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
 
@@ -45,8 +45,11 @@ jobs:
         uses: android-actions/setup-android@v3
 
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK
+        shell: bash
         run: |
+          set -e
+
           yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager \
@@ -69,44 +72,71 @@ jobs:
       # DOWNLOAD SHERPA-ONNX AAR
       # ============================================================
 
-      - name: Download sherpa-onnx Android AAR
+      - name: Download sherpa-onnx 1.13.7
         shell: bash
         run: |
+          set -e
+
           mkdir -p app/libs
 
-          echo "Downloading sherpa-onnx 1.13.7..."
+          AAR_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-1.13.7.aar"
 
-          curl -L --fail \
+          echo "=============================================="
+          echo "DOWNLOADING SHERPA-ONNX"
+          echo "=============================================="
+          echo "$AAR_URL"
+          echo
+
+          curl -L \
+            --fail \
             --retry 5 \
             --retry-delay 3 \
+            --connect-timeout 30 \
+            --max-time 1800 \
             -o app/libs/sherpa-onnx-1.13.7.aar \
-            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-1.13.7.aar
+            "$AAR_URL"
+
+          if [ ! -s app/libs/sherpa-onnx-1.13.7.aar ]; then
+            echo "ERROR: sherpa-onnx AAR was not downloaded."
+            exit 1
+          fi
 
           echo
-          echo "AAR:"
+          echo "AAR downloaded successfully:"
           ls -lh app/libs/sherpa-onnx-1.13.7.aar
 
 
       # ============================================================
       # DOWNLOAD YOUR SUPERTONIC-3 RELEASE
       #
-      # YOUR RELEASE:
+      # RELEASE PAGE:
       # https://github.com/vishala5000/vtts/releases/tag/vtts
+      #
+      # ASSET BASE:
+      # https://github.com/vishala5000/vtts/releases/download/vtts
       # ============================================================
 
       - name: Download Supertonic-3 INT8 model
         shell: bash
         run: |
+          set -e
 
-          mkdir -p app/src/main/assets/supertonic
+          MODEL_DIR="app/src/main/assets/supertonic"
+
+          mkdir -p "$MODEL_DIR"
 
           BASE_URL="https://github.com/vishala5000/vtts/releases/download/vtts"
 
+          echo
           echo "=============================================="
-          echo "Downloading Supertonic-3 model"
-          echo "Release: vtts"
+          echo "SUPERTONIC-3 MODEL"
+          echo "=============================================="
           echo "Repository: vishala5000/vtts"
+          echo "Release:    vtts"
+          echo "URL:"
+          echo "$BASE_URL"
           echo "=============================================="
+          echo
 
           files=(
             "duration_predictor.int8.onnx"
@@ -120,7 +150,6 @@ jobs:
 
           for file in "${files[@]}"; do
 
-            echo
             echo "----------------------------------------------"
             echo "Downloading:"
             echo "$file"
@@ -129,17 +158,29 @@ jobs:
             curl -L \
               --fail \
               --retry 5 \
-              --retry-delay 3 \
+              --retry-delay 5 \
               --connect-timeout 30 \
-              --max-time 900 \
-              -o "app/src/main/assets/supertonic/$file" \
+              --max-time 1800 \
+              -o "$MODEL_DIR/$file" \
               "$BASE_URL/$file"
 
-            if [ ! -s "app/src/main/assets/supertonic/$file" ]; then
-              echo "ERROR: Downloaded file is missing or empty:"
-              echo "$file"
+            if [ ! -f "$MODEL_DIR/$file" ]; then
+              echo
+              echo "ERROR: File does not exist:"
+              echo "$MODEL_DIR/$file"
               exit 1
             fi
+
+            if [ ! -s "$MODEL_DIR/$file" ]; then
+              echo
+              echo "ERROR: File is empty:"
+              echo "$MODEL_DIR/$file"
+              exit 1
+            fi
+
+            echo "Downloaded successfully:"
+            ls -lh "$MODEL_DIR/$file"
+            echo
 
           done
 
@@ -151,11 +192,9 @@ jobs:
       - name: Verify Supertonic model
         shell: bash
         run: |
+          set -e
 
-          echo
-          echo "=============================================="
-          echo "VERIFYING SUPERTONIC MODEL"
-          echo "=============================================="
+          MODEL_DIR="app/src/main/assets/supertonic"
 
           required=(
             "duration_predictor.int8.onnx"
@@ -167,41 +206,101 @@ jobs:
             "voice.bin"
           )
 
+          echo
+          echo "=============================================="
+          echo "VERIFYING MODEL FILES"
+          echo "=============================================="
+
           for file in "${required[@]}"; do
 
-            path="app/src/main/assets/supertonic/$file"
+            path="$MODEL_DIR/$file"
+
+            if [ ! -f "$path" ]; then
+              echo "ERROR: Missing:"
+              echo "$path"
+              exit 1
+            fi
 
             if [ ! -s "$path" ]; then
-              echo
-              echo "ERROR:"
+              echo "ERROR: Empty:"
               echo "$path"
-              echo "is missing or empty."
               exit 1
             fi
 
             echo "OK: $file"
-            ls -lh "$path"
 
           done
 
           echo
-          echo "All Supertonic model files verified."
+          echo "All seven model files are present."
+
+          echo
+          echo "Model directory:"
+          ls -lh "$MODEL_DIR"
+
+          echo
+          echo "Total model size:"
+          du -sh "$MODEL_DIR"
 
 
       # ============================================================
-      # SHOW FILES
+      # VERIFY AAR
+      # ============================================================
+
+      - name: Verify sherpa-onnx AAR
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -s app/libs/sherpa-onnx-1.13.7.aar ]; then
+            echo "ERROR: AAR missing."
+            exit 1
+          fi
+
+          echo "AAR:"
+          ls -lh app/libs/sherpa-onnx-1.13.7.aar
+
+
+      # ============================================================
+      # SHOW IMPORTANT FILES
       # ============================================================
 
       - name: Show project files
         shell: bash
         run: |
-
           echo
           echo "=============================================="
           echo "PROJECT FILES"
           echo "=============================================="
 
-          find . -maxdepth 8 -type f | sort
+          find app/src/main \
+            -type f \
+            -print \
+            | sort
+
+          echo
+          echo "=============================================="
+          echo "LIBRARIES"
+          echo "=============================================="
+
+          find app/libs \
+            -type f \
+            -exec ls -lh {} \;
+
+
+      # ============================================================
+      # CLEAN
+      # ============================================================
+
+      - name: Clean Gradle project
+        shell: bash
+        run: |
+          set -e
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            clean
 
 
       # ============================================================
@@ -209,12 +308,112 @@ jobs:
       # ============================================================
 
       - name: Build debug APK
+        shell: bash
         run: |
+          set -e
+
+          echo
+          echo "=============================================="
+          echo "BUILDING DEBUG APK"
+          echo "=============================================="
+
           gradle \
             --no-daemon \
             --stacktrace \
-            clean \
+            --info \
             assembleDebug
+
+
+      # ============================================================
+      # DEBUG APK DIAGNOSTICS
+      # ============================================================
+
+      - name: Inspect debug build
+        if: always()
+        shell: bash
+        run: |
+          echo
+          echo "=============================================="
+          echo "DEBUG BUILD OUTPUT"
+          echo "=============================================="
+
+          if [ -d "app/build" ]; then
+
+            echo
+            echo "APK files:"
+            find app/build \
+              -type f \
+              -name "*.apk" \
+              -print \
+              || true
+
+            echo
+            echo "All files under app/build/outputs:"
+            find app/build/outputs \
+              -type f \
+              -print \
+              2>/dev/null \
+              || true
+
+          else
+
+            echo "app/build does not exist."
+
+          fi
+
+
+      # ============================================================
+      # VERIFY DEBUG APK
+      # ============================================================
+
+      - name: Verify debug APK
+        shell: bash
+        run: |
+          set -e
+
+          echo
+          echo "=============================================="
+          echo "VERIFYING DEBUG APK"
+          echo "=============================================="
+
+          DEBUG_APK=""
+
+          while IFS= read -r file; do
+
+            if [[ "$file" == *debug*.apk ]]; then
+              DEBUG_APK="$file"
+              break
+            fi
+
+          done < <(
+            find app/build \
+              -type f \
+              -name "*.apk" \
+              -print
+          )
+
+          if [ -z "$DEBUG_APK" ]; then
+
+            echo
+            echo "ERROR: DEBUG APK WAS NOT GENERATED."
+            echo
+
+            echo "Searching entire build directory:"
+            find app/build \
+              -maxdepth 8 \
+              -type f \
+              -print \
+              2>/dev/null \
+              || true
+
+            exit 1
+          fi
+
+          echo
+          echo "DEBUG APK FOUND:"
+          echo "$DEBUG_APK"
+
+          ls -lh "$DEBUG_APK"
 
 
       # ============================================================
@@ -222,41 +421,138 @@ jobs:
       # ============================================================
 
       - name: Build release APK
+        shell: bash
         run: |
+          set -e
+
+          echo
+          echo "=============================================="
+          echo "BUILDING RELEASE APK"
+          echo "=============================================="
+
           gradle \
             --no-daemon \
             --stacktrace \
-            clean \
+            --info \
             assembleRelease
 
 
       # ============================================================
-      # SHOW APK
+      # RELEASE APK DIAGNOSTICS
       # ============================================================
 
-      - name: List generated APKs
+      - name: Inspect release build
+        if: always()
         shell: bash
         run: |
+          echo
+          echo "=============================================="
+          echo "RELEASE BUILD OUTPUT"
+          echo "=============================================="
+
+          if [ -d "app/build" ]; then
+
+            echo
+            echo "APK files:"
+            find app/build \
+              -type f \
+              -name "*.apk" \
+              -print \
+              || true
+
+            echo
+            echo "Release outputs:"
+            find app/build/outputs \
+              -type f \
+              -print \
+              2>/dev/null \
+              || true
+
+          else
+
+            echo "app/build does not exist."
+
+          fi
+
+
+      # ============================================================
+      # VERIFY RELEASE APK
+      # ============================================================
+
+      - name: Verify release APK
+        shell: bash
+        run: |
+          set -e
 
           echo
           echo "=============================================="
-          echo "DEBUG APK"
+          echo "VERIFYING RELEASE APK"
           echo "=============================================="
 
-          find app/build/outputs/apk/debug \
+          RELEASE_APK=""
+
+          while IFS= read -r file; do
+
+            if [[ "$file" == *release*.apk ]]; then
+              RELEASE_APK="$file"
+              break
+            fi
+
+          done < <(
+            find app/build \
+              -type f \
+              -name "*.apk" \
+              -print
+          )
+
+          if [ -z "$RELEASE_APK" ]; then
+
+            echo
+            echo "ERROR: RELEASE APK WAS NOT GENERATED."
+            echo
+
+            echo "Searching entire build directory:"
+            find app/build \
+              -maxdepth 8 \
+              -type f \
+              -print \
+              2>/dev/null \
+              || true
+
+            exit 1
+          fi
+
+          echo
+          echo "RELEASE APK FOUND:"
+          echo "$RELEASE_APK"
+
+          ls -lh "$RELEASE_APK"
+
+
+      # ============================================================
+      # FINAL APK LIST
+      # ============================================================
+
+      - name: List final APKs
+        shell: bash
+        run: |
+          echo
+          echo "=============================================="
+          echo "FINAL APK FILES"
+          echo "=============================================="
+
+          find app/build \
             -type f \
             -name "*.apk" \
             -exec ls -lh {} \;
 
           echo
-          echo "=============================================="
-          echo "RELEASE APK"
-          echo "=============================================="
-
-          find app/build/outputs/apk/release \
+          echo "APK paths:"
+          
+          find app/build \
             -type f \
             -name "*.apk" \
-            -exec ls -lh {} \;
+            -print
 
 
       # ============================================================
@@ -267,7 +563,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: VTTS-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            app/build/outputs/**/*.apk
           if-no-files-found: error
 
 
@@ -279,5 +576,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: VTTS-release
-          path: app/build/outputs/apk/release/*.apk
+          path: |
+            app/build/outputs/**/*.apk
           if-no-files-found: error
