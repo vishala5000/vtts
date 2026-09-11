@@ -19,14 +19,23 @@ android {
     }
 
     buildTypes {
-        release {
+
+        debug {
             isMinifyEnabled = false
             isShrinkResources = false
         }
 
-        debug {
+        release {
             isMinifyEnabled = false
+            isShrinkResources = false
         }
+    }
+
+    androidResources {
+        noCompress += listOf(
+            "onnx",
+            "bin"
+        )
     }
 
     packaging {
@@ -54,5 +63,12 @@ android {
 }
 
 dependencies {
-    implementation(files("libs/sherpa-onnx-1.13.7.aar"))
+
+    implementation(
+        files("libs/sherpa-onnx-1.13.7.aar")
+    )
+
+    implementation(
+        "androidx.appcompat:appcompat:1.7.1"
+    )
 }
