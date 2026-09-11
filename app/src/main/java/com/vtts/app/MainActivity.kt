@@ -1,15 +1,14 @@
 package com.vtts.app
 
-import android.app.Activity
+import android.content.ContentValues
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
+import android.os.Environment
+import android.provider.MediaStore
 import android.view.Gravity
-import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -19,88 +18,104 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
 import java.io.File
+import java.util.Locale
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
-import kotlin.math.roundToInt
 
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var textInput: EditText
+
     private lateinit var languageSpinner: Spinner
+
     private lateinit var speakerSpinner: Spinner
+
     private lateinit var speedSeekBar: SeekBar
-    private lateinit var speedValue: TextView
+
+    private lateinit var speedLabel: TextView
+
     private lateinit var statusText: TextView
 
     private lateinit var speakButton: Button
+
     private lateinit var stopButton: Button
+
+    private lateinit var playButton: Button
+
     private lateinit var saveButton: Button
 
-    private lateinit var ttsManager: TtsManager
-
-    private val executor =
+    private val executor:
+        ExecutorService =
         Executors.newSingleThreadExecutor()
 
-    private val mainHandler =
-        Handler(Looper.getMainLooper())
+    private var generationFuture:
+        Future<*>? = null
 
-    private var currentTask: Future<*>? = null
+    private var ttsManager:
+        TtsManager? = null
 
-    private var latestSamples: FloatArray? = null
-    private var latestSampleRate: Int = 24000
+    private var engineReady =
+        false
 
-    private var audioTrack: AudioTrack? = null
+    private var lastAudio:
+        TtsManager.GeneratedResult? = null
 
+    private var audioTrack:
+        AudioTrack? = null
+
+    private var userStopped =
+        false
+
+    /*
+     * ONLY languages supported by this app.
+     *
+     * Supertonic-3 supports English and Hindi.
+     *
+     * Kannada is intentionally NOT included because
+     * Supertonic-3 does not currently list "kn".
+     */
     private val languages =
         listOf(
-            Language("English", "en"),
-            Language("Korean", "ko"),
-            Language("Japanese", "ja"),
-            Language("Arabic", "ar"),
-            Language("Bulgarian", "bg"),
-            Language("Czech", "cs"),
-            Language("Danish", "da"),
-            Language("German", "de"),
-            Language("Greek", "el"),
-            Language("Spanish", "es"),
-            Language("Estonian", "et"),
-            Language("Finnish", "fi"),
-            Language("French", "fr"),
-            Language("Hindi", "hi"),
-            Language("Croatian", "hr"),
-            Language("Hungarian", "hu"),
-            Language("Indonesian", "id"),
-            Language("Italian", "it"),
-            Language("Lithuanian", "lt"),
-            Language("Latvian", "lv"),
-            Language("Dutch", "nl"),
-            Language("Polish", "pl"),
-            Language("Portuguese", "pt"),
-            Language("Romanian", "ro"),
-            Language("Russian", "ru"),
-            Language("Slovak", "sk"),
-            Language("Slovenian", "sl"),
-            Language("Swedish", "sv"),
-            Language("Turkish", "tr"),
-            Language("Ukrainian", "uk"),
-            Language("Vietnamese", "vi")
+
+            Language(
+                name = "English",
+                code = "en"
+            ),
+
+            Language(
+                name = "Hindi",
+                code = "hi"
+            )
         )
+
+    /*
+     * Keep ALL 10 Supertonic voices.
+     */
+    private val speakers =
+        (0..9).map {
+            "Speaker $it"
+        }
 
     override fun onCreate(
         savedInstanceState: Bundle?
     ) {
-        super.onCreate(savedInstanceState)
 
-        ttsManager =
-            TtsManager(applicationContext)
+        super.onCreate(
+            savedInstanceState
+        )
 
         createUi()
 
-        initializeEngine()
+        initializeTts()
     }
 
     private fun createUi() {
+
+        val scroll =
+            ScrollView(this)
 
         val root =
             LinearLayout(this).apply {
@@ -112,35 +127,11 @@ class MainActivity : Activity() {
                     dp(20),
                     dp(20),
                     dp(20),
-                    dp(20)
-                )
-
-                setBackgroundColor(
-                    getColor(
-                        R.color.background
-                    )
+                    dp(30)
                 )
             }
 
-        val scroll =
-            ScrollView(this)
-
-        val content =
-            LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.VERTICAL
-            }
-
-        scroll.addView(content)
-
-        root.addView(
-            scroll,
-            LinearLayout.LayoutParams(
-                -1,
-                0,
-                1f
-            )
-        )
+        scroll.addView(root)
 
         val title =
             TextView(this).apply {
@@ -149,14 +140,14 @@ class MainActivity : Activity() {
 
                 textSize = 30f
 
+                gravity =
+                    Gravity.CENTER
+
                 setTextColor(
                     getColor(
                         R.color.text_primary
                     )
                 )
-
-                gravity =
-                    Gravity.CENTER
 
                 setPadding(
                     0,
@@ -166,15 +157,18 @@ class MainActivity : Activity() {
                 )
             }
 
-        content.addView(title)
+        root.addView(
+            title,
+            match()
+        )
 
         val subtitle =
             TextView(this).apply {
 
                 text =
-                    "Supertonic-3 • Offline TTS"
+                    "Supertonic-3 INT8 • Fast • Fully Offline"
 
-                textSize = 15f
+                textSize = 14f
 
                 gravity =
                     Gravity.CENTER
@@ -193,8 +187,14 @@ class MainActivity : Activity() {
                 )
             }
 
-        content.addView(subtitle)
+        root.addView(
+            subtitle,
+            match()
+        )
 
+        /*
+         * TEXT
+         */
         textInput =
             EditText(this).apply {
 
@@ -203,18 +203,17 @@ class MainActivity : Activity() {
 
                 textSize = 18f
 
-                gravity =
-                    Gravity.TOP
-
                 minLines = 7
 
-                maxLines = 14
+                gravity =
+                    Gravity.TOP or
+                        Gravity.START
 
                 setPadding(
-                    dp(16),
-                    dp(16),
-                    dp(16),
-                    dp(16)
+                    dp(14),
+                    dp(14),
+                    dp(14),
+                    dp(14)
                 )
 
                 setTextColor(
@@ -236,144 +235,111 @@ class MainActivity : Activity() {
                 )
             }
 
-        content.addView(
+        root.addView(
             textInput,
-            marginParams(
-                0,
-                0,
-                0,
-                18
-            )
+            matchWrap(16)
         )
 
+        /*
+         * LANGUAGE
+         */
         addLabel(
-            content,
+            root,
             "Language"
         )
 
         languageSpinner =
             Spinner(this)
 
-        val languageAdapter =
+        languageSpinner.adapter =
             ArrayAdapter(
                 this,
+
                 android.R.layout.simple_spinner_dropdown_item,
+
                 languages.map {
                     it.name
                 }
             )
 
-        languageSpinner.adapter =
-            languageAdapter
-
-        content.addView(
+        root.addView(
             languageSpinner,
-            marginParams(
-                0,
-                0,
-                0,
-                14
-            )
+            matchWrap(8)
         )
 
+        /*
+         * SPEAKER
+         */
         addLabel(
-            content,
-            "Speaker"
+            root,
+            "Voice"
+
         )
 
         speakerSpinner =
             Spinner(this)
 
-        val speakers =
-            (0..9).map {
-                "Speaker $it"
-            }
-
-        val speakerAdapter =
+        speakerSpinner.adapter =
             ArrayAdapter(
                 this,
+
                 android.R.layout.simple_spinner_dropdown_item,
+
                 speakers
             )
 
-        speakerSpinner.adapter =
-            speakerAdapter
-
-        content.addView(
+        root.addView(
             speakerSpinner,
-            marginParams(
-                0,
-                0,
-                0,
-                14
-            )
+            matchWrap(8)
         )
 
+        /*
+         * SPEED
+         */
         addLabel(
-            content,
+            root,
             "Speed"
         )
 
-        val speedLayout =
-            LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.HORIZONTAL
-
-                gravity =
-                    Gravity.CENTER_VERTICAL
-            }
-
-        speedSeekBar =
-            SeekBar(this).apply {
-
-                max = 150
-
-                progress = 50
-            }
-
-        speedLayout.addView(
-            speedSeekBar,
-            LinearLayout.LayoutParams(
-                0,
-                -2,
-                1f
-            )
-        )
-
-        speedValue =
+        speedLabel =
             TextView(this).apply {
 
-                text = "1.00x"
+                text =
+                    "1.25x"
 
-                textSize = 16f
+                textSize =
+                    16f
 
                 setTextColor(
                     getColor(
                         R.color.text_primary
                     )
                 )
-
-                gravity =
-                    Gravity.CENTER
             }
 
-        speedLayout.addView(
-            speedValue,
-            LinearLayout.LayoutParams(
-                dp(70),
-                -2
-            )
+        root.addView(
+            speedLabel,
+            matchWrap(4)
         )
 
-        content.addView(
-            speedLayout,
-            marginParams(
-                0,
-                0,
-                0,
-                18
-            )
+        /*
+         * Default speed = 1.25x.
+         *
+         * Range:
+         *
+         * 0.50x -> 2.00x
+         */
+        speedSeekBar =
+            SeekBar(this).apply {
+
+                max = 150
+
+                progress = 75
+            }
+
+        root.addView(
+            speedSeekBar,
+            matchWrap(12)
         )
 
         speedSeekBar.setOnSeekBarChangeListener(
@@ -388,11 +354,11 @@ class MainActivity : Activity() {
 
                     val speed =
                         0.5f +
-                            progress /
-                            100f
+                            progress / 100f
 
-                    speedValue.text =
+                    speedLabel.text =
                         String.format(
+                            Locale.US,
                             "%.2fx",
                             speed
                         )
@@ -410,72 +376,91 @@ class MainActivity : Activity() {
             }
         )
 
+        /*
+         * SPEAK
+         */
         speakButton =
-            createButton(
-                "SPEAK"
+            makeButton(
+                "Speak"
             )
 
-        stopButton =
-            createButton(
-                "STOP"
-            )
-
-        saveButton =
-            createButton(
-                "SAVE WAV"
-            )
-
-        content.addView(
+        root.addView(
             speakButton,
-            marginParams(
-                0,
-                0,
-                0,
-                10
-            )
+            matchWrap(8)
         )
-
-        content.addView(
-            stopButton,
-            marginParams(
-                0,
-                0,
-                0,
-                10
-            )
-        )
-
-        content.addView(
-            saveButton,
-            marginParams(
-                0,
-                0,
-                0,
-                18
-            )
-        )
-
-        speakButton.isEnabled = false
-        stopButton.isEnabled = false
-        saveButton.isEnabled = false
 
         speakButton.setOnClickListener {
             speak()
         }
 
+        /*
+         * STOP
+         */
+        stopButton =
+            makeButton(
+                "Stop"
+            )
+
+        stopButton.isEnabled =
+            false
+
+        root.addView(
+            stopButton,
+            matchWrap(8)
+        )
+
         stopButton.setOnClickListener {
-            stop()
+            stopGeneration()
         }
+
+        /*
+         * PLAY
+         */
+        playButton =
+            makeButton(
+                "Play Last Audio"
+            )
+
+        playButton.isEnabled =
+            false
+
+        root.addView(
+            playButton,
+            matchWrap(8)
+        )
+
+        playButton.setOnClickListener {
+            playLastAudio()
+        }
+
+        /*
+         * SAVE
+         */
+        saveButton =
+            makeButton(
+                "Save WAV to Downloads"
+            )
+
+        saveButton.isEnabled =
+            false
+
+        root.addView(
+            saveButton,
+            matchWrap(8)
+        )
 
         saveButton.setOnClickListener {
-            saveLatestAudio()
+            saveLastAudio()
         }
 
+        /*
+         * STATUS
+         */
         statusText =
             TextView(this).apply {
 
                 text =
-                    "Loading offline model..."
+                    "Loading TTS model..."
 
                 textSize = 14f
 
@@ -489,54 +474,95 @@ class MainActivity : Activity() {
                 )
 
                 setPadding(
-                    0,
-                    dp(10),
-                    0,
-                    dp(20)
+                    dp(4),
+                    dp(20),
+                    dp(4),
+                    0
                 )
             }
 
-        content.addView(statusText)
+        root.addView(
+            statusText,
+            matchWrap(8)
+        )
 
-        setContentView(root)
+        speakButton.isEnabled =
+            false
+
+        setContentView(scroll)
     }
 
-    private fun initializeEngine() {
+    private fun initializeTts() {
 
-        currentTask =
-            executor.submit {
+        executor.execute {
 
-                try {
+            try {
 
-                    ttsManager.initialize(
-                        threads = 2
+                val manager =
+                    TtsManager(
+                        applicationContext
                     )
 
-                    mainHandler.post {
+                /*
+                 * Use 4 CPU threads.
+                 *
+                 * This can improve inference speed on
+                 * modern multi-core Android phones.
+                 */
+                manager.initialize(
+                    threads = 4
+                )
 
-                        statusText.text =
-                            "Ready • 100% offline"
+                ttsManager =
+                    manager
 
-                        speakButton.isEnabled =
-                            true
-                    }
+                engineReady =
+                    true
 
-                } catch (error: Throwable) {
+                runOnUiThread {
 
-                    mainHandler.post {
+                    statusText.text =
+                        "Ready • Offline • Fast mode"
 
-                        statusText.text =
-                            "Model initialization failed"
+                    speakButton.isEnabled =
+                        true
 
-                        showError(
-                            error
-                        )
-                    }
+                    stopButton.isEnabled =
+                        false
+                }
+
+            } catch (
+                error: Throwable
+            ) {
+
+                engineReady =
+                    false
+
+                runOnUiThread {
+
+                    statusText.text =
+                        "TTS initialization failed: ${
+                            error.message
+                                ?: "Unknown error"
+                        }"
+
+                    speakButton.isEnabled =
+                        false
                 }
             }
+        }
     }
 
     private fun speak() {
+
+        if (!engineReady) {
+
+            toast(
+                "TTS is still loading"
+            )
+
+            return
+        }
 
         val text =
             textInput.text
@@ -545,281 +571,426 @@ class MainActivity : Activity() {
 
         if (text.isEmpty()) {
 
-            Toast.makeText(
-                this,
-                "Enter some text first.",
-                Toast.LENGTH_SHORT
-            ).show()
+            textInput.error =
+                "Enter text"
 
             return
         }
 
-        stopPlayback()
+        /*
+         * Stop previous generation/playback.
+         */
+        stopGeneration()
 
-        currentTask?.cancel(
-            true
-        )
+        val manager =
+            ttsManager
+                ?: return
+
+        userStopped =
+            false
+
+        val language =
+            languages[
+                languageSpinner.selectedItemPosition
+                    .coerceIn(
+                        0,
+                        languages.lastIndex
+                    )
+            ].code
+
+        val speaker =
+            speakerSpinner.selectedItemPosition
+                .coerceIn(
+                    0,
+                    9
+                )
+
+        val speed =
+            0.5f +
+                speedSeekBar.progress / 100f
+
+        lastAudio =
+            null
 
         speakButton.isEnabled =
             false
 
         stopButton.isEnabled =
             true
+
+        playButton.isEnabled =
+            false
 
         saveButton.isEnabled =
             false
 
         statusText.text =
-            "Generating speech..."
+            "Generating..."
 
-        val language =
-            languages[
-                languageSpinner.selectedItemPosition
-            ].code
-
-        val speaker =
-            speakerSpinner
-                .selectedItemPosition
-
-        val speed =
-            0.5f +
-                speedSeekBar.progress /
-                100f
-
-        currentTask =
+        generationFuture =
             executor.submit {
 
                 try {
 
+                    manager.resetStop()
+
+                    /*
+                     * 4 steps = faster mode.
+                     */
                     val result =
-                        ttsManager.generate(
+                        manager.generate(
+
                             text = text,
-                            speakerId = speaker,
-                            speed = speed,
-                            language = language,
-                            steps = 8
+
+                            speakerId =
+                                speaker,
+
+                            speed =
+                                speed,
+
+                            language =
+                                language,
+
+                            steps =
+                                TtsManager.DEFAULT_STEPS
                         )
 
-                    latestSamples =
-                        result.samples
+                    if (userStopped) {
+                        return@submit
+                    }
 
-                    latestSampleRate =
-                        result.sampleRate
+                    if (
+                        Thread.currentThread()
+                            .isInterrupted
+                    ) {
+                        return@submit
+                    }
 
-                    mainHandler.post {
+                    lastAudio =
+                        result
+
+                    runOnUiThread {
+
+                        if (userStopped) {
+                            return@runOnUiThread
+                        }
 
                         statusText.text =
-                            "Playing • ${result.sampleRate} Hz"
+                            "Generated • ${
+                                formatDuration(
+                                    result
+                                )
+                            }"
+
+                        speakButton.isEnabled =
+                            true
+
+                        stopButton.isEnabled =
+                            false
+
+                        playButton.isEnabled =
+                            true
 
                         saveButton.isEnabled =
                             true
+
+                        /*
+                         * Automatically play generated speech.
+                         */
+                        playLastAudio()
                     }
 
-                    playAudio(
-                        result.samples,
-                        result.sampleRate
-                    )
+                } catch (
+                    error: Throwable
+                ) {
 
-                    mainHandler.post {
+                    if (!userStopped) {
 
-                        if (
-                            !Thread.currentThread()
-                                .isInterrupted
-                        ) {
+                        runOnUiThread {
 
                             statusText.text =
-                                "Ready • 100% offline"
+                                "Error: ${
+                                    error.message
+                                        ?: "Generation failed"
+                                }"
+
+                            speakButton.isEnabled =
+                                engineReady
+
+                            stopButton.isEnabled =
+                                false
                         }
-
-                        speakButton.isEnabled =
-                            true
-
-                        stopButton.isEnabled =
-                            false
                     }
 
-                } catch (error: Throwable) {
+                } finally {
 
-                    mainHandler.post {
-
-                        speakButton.isEnabled =
-                            true
-
-                        stopButton.isEnabled =
-                            false
-
-                        statusText.text =
-                            "Generation failed"
-
-                        showError(
-                            error
-                        )
-                    }
+                    generationFuture =
+                        null
                 }
             }
     }
 
-    private fun playAudio(
-        samples: FloatArray,
-        sampleRate: Int
-    ) {
+    private fun stopGeneration() {
 
-        val minBuffer =
-            AudioTrack.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
+        userStopped =
+            true
 
-        if (minBuffer <= 0) {
-            throw IllegalStateException(
-                "Audio output is not supported."
-            )
-        }
+        ttsManager?.stop()
 
-        val bufferSize =
-            maxOf(
-                minBuffer,
-                4096
-            )
-
-        val track =
-            AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(
-                            AudioAttributes.USAGE_MEDIA
-                        )
-                        .setContentType(
-                            AudioAttributes.CONTENT_TYPE_SPEECH
-                        )
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(
-                            sampleRate
-                        )
-                        .setEncoding(
-                            AudioFormat.ENCODING_PCM_16BIT
-                        )
-                        .setChannelMask(
-                            AudioFormat.CHANNEL_OUT_MONO
-                        )
-                        .build()
-                )
-                .setBufferSizeInBytes(
-                    bufferSize
-                )
-                .setTransferMode(
-                    AudioTrack.MODE_STREAM
-                )
-                .build()
-
-        audioTrack =
-            track
-
-        track.play()
-
-        val pcm =
-            ShortArray(
-                minOf(
-                    4096,
-                    samples.size
-                )
-            )
-
-        var position = 0
-
-        try {
-
-            while (
-                position < samples.size &&
-                !Thread.currentThread()
-                    .isInterrupted
-            ) {
-
-                val count =
-                    minOf(
-                        pcm.size,
-                        samples.size - position
-                    )
-
-                for (i in 0 until count) {
-
-                    val sample =
-                        samples[position + i]
-                            .coerceIn(
-                                -1f,
-                                1f
-                            )
-
-                    pcm[i] =
-                        (
-                            if (sample < 0f) {
-                                sample * 32768f
-                            } else {
-                                sample * 32767f
-                            }
-                        )
-                            .roundToInt()
-                            .toShort()
-                }
-
-                track.write(
-                    pcm,
-                    0,
-                    count
-                )
-
-                position += count
-            }
-
-        } finally {
-
-            try {
-                track.stop()
-            } catch (_: Throwable) {
-            }
-
-            track.release()
-
-            audioTrack = null
-        }
-    }
-
-    private fun stop() {
-
-        currentTask?.cancel(
+        generationFuture?.cancel(
             true
         )
 
-        stopPlayback()
+        generationFuture =
+            null
+
+        stopAudioPlayback()
 
         speakButton.isEnabled =
-            ttsManagerIsReady()
+            engineReady
 
         stopButton.isEnabled =
             false
 
         statusText.text =
-            if (ttsManagerIsReady()) {
-                "Ready • 100% offline"
+            if (engineReady) {
+                "Ready"
             } else {
-                "Loading..."
+                "Loading TTS model..."
             }
     }
 
-    private fun stopPlayback() {
+    private fun playLastAudio() {
+
+        val audio =
+            lastAudio
+                ?: return
+
+        stopAudioPlayback()
 
         try {
 
+            val minBuffer =
+                AudioTrack.getMinBufferSize(
+                    audio.sampleRate,
+
+                    AudioFormat.CHANNEL_OUT_MONO,
+
+                    AudioFormat.ENCODING_PCM_FLOAT
+                )
+
+            val bufferSize =
+                maxOf(
+                    minBuffer,
+                    audio.samples.size * 4
+                )
+
+            audioTrack =
+                AudioTrack.Builder()
+
+                    .setAudioAttributes(
+
+                        AudioAttributes.Builder()
+
+                            .setUsage(
+                                AudioAttributes.USAGE_MEDIA
+                            )
+
+                            .setContentType(
+                                AudioAttributes.CONTENT_TYPE_SPEECH
+                            )
+
+                            .build()
+                    )
+
+                    .setAudioFormat(
+
+                        AudioFormat.Builder()
+
+                            .setSampleRate(
+                                audio.sampleRate
+                            )
+
+                            .setEncoding(
+                                AudioFormat.ENCODING_PCM_FLOAT
+                            )
+
+                            .setChannelMask(
+                                AudioFormat.CHANNEL_OUT_MONO
+                            )
+
+                            .build()
+                    )
+
+                    .setBufferSizeInBytes(
+                        bufferSize
+                    )
+
+                    .setTransferMode(
+                        AudioTrack.MODE_STATIC
+                    )
+
+                    .build()
+
+            val written =
+                audioTrack?.write(
+
+                    audio.samples,
+
+                    0,
+
+                    audio.samples.size,
+
+                    AudioTrack.WRITE_BLOCKING
+                )
+
+            if (
+                written == null ||
+                written < 0
+            ) {
+
+                throw IllegalStateException(
+                    "AudioTrack write failed"
+                )
+            }
+
+            audioTrack?.play()
+
+        } catch (
+            _: Throwable
+        ) {
+
+            playPcm16Fallback(
+                audio
+            )
+        }
+    }
+
+    private fun playPcm16Fallback(
+        audio: TtsManager.GeneratedResult
+    ) {
+
+        stopAudioPlayback()
+
+        try {
+
+            val pcm =
+                ShortArray(
+                    audio.samples.size
+                )
+
+            for (
+                i in audio.samples.indices
+            ) {
+
+                val sample =
+                    audio.samples[i]
+                        .coerceIn(
+                            -1f,
+                            1f
+                        )
+
+                pcm[i] =
+                    (
+                        sample * 32767f
+                    )
+                        .toInt()
+                        .toShort()
+            }
+
+            val minBuffer =
+                AudioTrack.getMinBufferSize(
+
+                    audio.sampleRate,
+
+                    AudioFormat.CHANNEL_OUT_MONO,
+
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+
+            val bufferSize =
+                maxOf(
+                    minBuffer,
+                    pcm.size * 2
+                )
+
+            audioTrack =
+                AudioTrack.Builder()
+
+                    .setAudioAttributes(
+
+                        AudioAttributes.Builder()
+
+                            .setUsage(
+                                AudioAttributes.USAGE_MEDIA
+                            )
+
+                            .setContentType(
+                                AudioAttributes.CONTENT_TYPE_SPEECH
+                            )
+
+                            .build()
+                    )
+
+                    .setAudioFormat(
+
+                        AudioFormat.Builder()
+
+                            .setSampleRate(
+                                audio.sampleRate
+                            )
+
+                            .setEncoding(
+                                AudioFormat.ENCODING_PCM_16BIT
+                            )
+
+                            .setChannelMask(
+                                AudioFormat.CHANNEL_OUT_MONO
+                            )
+
+                            .build()
+                    )
+
+                    .setBufferSizeInBytes(
+                        bufferSize
+                    )
+
+                    .setTransferMode(
+                        AudioTrack.MODE_STATIC
+                    )
+
+                    .build()
+
+            audioTrack?.write(
+                pcm,
+                0,
+                pcm.size
+            )
+
+            audioTrack?.play()
+
+        } catch (
+            error: Throwable
+        ) {
+
+            toast(
+                "Playback failed: ${
+                    error.message
+                        ?: "Unknown error"
+                }"
+            )
+        }
+    }
+
+    private fun stopAudioPlayback() {
+
+        try {
             audioTrack?.pause()
+        } catch (_: Throwable) {
+        }
 
+        try {
             audioTrack?.flush()
-
-            audioTrack?.stop()
-
         } catch (_: Throwable) {
         }
 
@@ -828,160 +999,347 @@ class MainActivity : Activity() {
         } catch (_: Throwable) {
         }
 
-        audioTrack = null
+        audioTrack =
+            null
     }
 
-    private fun saveLatestAudio() {
+    /*
+     * ============================================================
+     * SAVE WAV TO PUBLIC DOWNLOADS
+     * ============================================================
+     *
+     * Android 10+:
+     *
+     * Download/
+     *     VTTS/
+     *         vtts_....wav
+     *
+     * MediaStore is used so no storage permission is needed.
+     */
+    private fun saveLastAudio() {
 
-        val samples =
-            latestSamples
-
-        if (
-            samples == null ||
-            samples.isEmpty()
-        ) {
-
-            Toast.makeText(
-                this,
-                "Generate speech first.",
-                Toast.LENGTH_SHORT
-            ).show()
-
-            return
-        }
+        val audio =
+            lastAudio
+                ?: return
 
         try {
 
-            val outputDir =
-                File(
-                    getExternalFilesDir(null),
-                    "VTTS"
+            val filename =
+                "vtts_${
+                    System.currentTimeMillis()
+                }.wav"
+
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.Q
+            ) {
+
+                saveWavUsingMediaStore(
+                    filename = filename,
+                    audio = audio
                 )
 
-            outputDir.mkdirs()
+            } else {
 
-            val filename =
-                "vtts_${System.currentTimeMillis()}.wav"
+                saveWavLegacy(
+                    filename = filename,
+                    audio = audio
+                )
+            }
 
-            val output =
-                File(
-                    outputDir,
+        } catch (
+            error: Throwable
+        ) {
+
+            toast(
+                "Save failed: ${
+                    error.message
+                        ?: "Unknown error"
+                }"
+            )
+        }
+    }
+
+    /*
+     * Android 10+
+     *
+     * Uses MediaStore Downloads.
+     */
+    private fun saveWavUsingMediaStore(
+        filename: String,
+        audio: TtsManager.GeneratedResult
+    ) {
+
+        val resolver =
+            contentResolver
+
+        val values =
+            ContentValues().apply {
+
+                put(
+                    MediaStore.Downloads.DISPLAY_NAME,
                     filename
                 )
 
-            WaveWriter.write(
-                output,
-                samples,
-                latestSampleRate
+                put(
+                    MediaStore.Downloads.MIME_TYPE,
+                    "audio/wav"
+                )
+
+                put(
+                    MediaStore.Downloads.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS +
+                        "/VTTS"
+                )
+
+                put(
+                    MediaStore.Downloads.IS_PENDING,
+                    1
+                )
+            }
+
+        val uri =
+            resolver.insert(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                values
+            )
+                ?: throw IllegalStateException(
+                    "Could not create Downloads file"
+                )
+
+        try {
+
+            resolver.openOutputStream(
+                uri
+            ).use { output ->
+
+                if (output == null) {
+
+                    throw IllegalStateException(
+                        "Could not open output file"
+                    )
+                }
+
+                WaveWriter.write(
+                    output = output,
+                    samples = audio.samples,
+                    sampleRate = audio.sampleRate
+                )
+            }
+
+            val completed =
+                ContentValues().apply {
+
+                    put(
+                        MediaStore.Downloads.IS_PENDING,
+                        0
+                    )
+                }
+
+            resolver.update(
+                uri,
+                completed,
+                null,
+                null
             )
 
-            Toast.makeText(
-                this,
-                "Saved:\n${output.absolutePath}",
-                Toast.LENGTH_LONG
-            ).show()
+            statusText.text =
+                "Saved to Downloads/VTTS"
 
-        } catch (error: Throwable) {
-
-            showError(
-                error
+            toast(
+                "WAV saved to Downloads/VTTS"
             )
+
+        } catch (
+            error: Throwable
+        ) {
+
+            resolver.delete(
+                uri,
+                null,
+                null
+            )
+
+            throw error
         }
     }
 
-    private fun ttsManagerIsReady(): Boolean {
-        return try {
-            speakButton.isEnabled ||
-                statusText.text
-                    .toString()
-                    .startsWith("Ready")
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private fun showError(
-        error: Throwable
+    /*
+     * Android 9 and older.
+     */
+    private fun saveWavLegacy(
+        filename: String,
+        audio: TtsManager.GeneratedResult
     ) {
 
-        val message =
-            error.message
-                ?: error.javaClass.simpleName
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.M
+        ) {
 
-        Toast.makeText(
-            this,
-            message,
-            Toast.LENGTH_LONG
-        ).show()
+            if (
+                checkSelfPermission(
+                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+
+                requestPermissions(
+                    arrayOf(
+                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    ),
+                    REQUEST_STORAGE_PERMISSION
+                )
+
+                toast(
+                    "Allow storage permission and press Save again."
+                )
+
+                return
+            }
+        }
+
+        val downloads =
+            Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS
+            )
+
+        val directory =
+            File(
+                downloads,
+                "VTTS"
+            )
+
+        if (!directory.exists()) {
+            directory.mkdirs()
+        }
+
+        val file =
+            File(
+                directory,
+                filename
+            )
+
+        WaveWriter.write(
+            file = file,
+            samples = audio.samples,
+            sampleRate = audio.sampleRate
+        )
+
+        statusText.text =
+            "Saved to Downloads/VTTS"
+
+        toast(
+            "WAV saved to Downloads/VTTS"
+        )
+    }
+
+    private fun formatDuration(
+        audio: TtsManager.GeneratedResult
+    ): String {
+
+        val seconds =
+            audio.samples.size.toFloat() /
+                audio.sampleRate
+
+        return String.format(
+            Locale.US,
+            "%.1f sec",
+            seconds
+        )
     }
 
     private fun addLabel(
-        parent: LinearLayout,
+        root: LinearLayout,
         text: String
     ) {
 
         val label =
             TextView(this).apply {
 
-                this.text = text
+                this.text =
+                    text
 
-                textSize = 15f
+                textSize =
+                    15f
 
                 setTextColor(
                     getColor(
-                        R.color.text_secondary
+                        R.color.text_primary
                     )
                 )
 
                 setPadding(
-                    0,
-                    dp(4),
-                    0,
-                    dp(6)
+                    dp(2),
+                    dp(12),
+                    dp(2),
+                    dp(4)
                 )
             }
 
-        parent.addView(label)
+        root.addView(
+            label,
+            matchWrap(4)
+        )
     }
 
-    private fun createButton(
+    private fun makeButton(
         text: String
     ): Button {
 
         return Button(this).apply {
 
-            this.text = text
+            this.text =
+                text
 
-            textSize = 15f
+            textSize =
+                16f
 
-            isAllCaps = false
+            isAllCaps =
+                false
+
+            minHeight =
+                dp(52)
 
             setTextColor(
                 getColor(
                     R.color.white
                 )
             )
+
+            setBackgroundColor(
+                getColor(
+                    R.color.primary
+                )
+            )
         }
     }
 
-    private fun marginParams(
-        left: Int,
-        top: Int,
-        right: Int,
+    private fun match():
+        LinearLayout.LayoutParams {
+
+        return LinearLayout.LayoutParams(
+
+            LinearLayout.LayoutParams.MATCH_PARENT,
+
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+    }
+
+    private fun matchWrap(
         bottom: Int
     ): LinearLayout.LayoutParams {
 
         return LinearLayout.LayoutParams(
-            -1,
-            -2
+
+            LinearLayout.LayoutParams.MATCH_PARENT,
+
+            LinearLayout.LayoutParams.WRAP_CONTENT
+
         ).apply {
 
-            setMargins(
-                dp(left),
-                dp(top),
-                dp(right),
+            bottomMargin =
                 dp(bottom)
-            )
         }
     }
 
@@ -992,29 +1350,84 @@ class MainActivity : Activity() {
         return (
             value *
                 resources.displayMetrics.density
-            ).roundToInt()
+            ).toInt()
+    }
+
+    private fun toast(
+        message: String
+    ) {
+
+        Toast.makeText(
+            this,
+            message,
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        )
+
+        if (
+            requestCode ==
+            REQUEST_STORAGE_PERMISSION
+        ) {
+
+            if (
+                grantResults.isNotEmpty() &&
+                grantResults[0] ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+
+                toast(
+                    "Storage permission granted. Press Save WAV again."
+                )
+
+            } else {
+
+                toast(
+                    "Storage permission denied."
+                )
+            }
+        }
     }
 
     override fun onDestroy() {
 
-        stopPlayback()
+        userStopped =
+            true
 
-        currentTask?.cancel(
+        ttsManager?.stop()
+
+        generationFuture?.cancel(
             true
         )
 
-        executor.shutdownNow()
+        stopAudioPlayback()
 
-        try {
-            ttsManager.release()
-        } catch (_: Throwable) {
-        }
+        ttsManager?.release()
+
+        executor.shutdownNow()
 
         super.onDestroy()
     }
 
-    data class Language(
+    private data class Language(
         val name: String,
         val code: String
     )
+
+    companion object {
+
+        private const val REQUEST_STORAGE_PERMISSION =
+            1001
+    }
 }
