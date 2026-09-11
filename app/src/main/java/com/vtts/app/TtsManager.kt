@@ -6,7 +6,7 @@ import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsSupertonicModelConfig
-import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 class TtsManager(
     private val context: Context
@@ -14,8 +14,7 @@ class TtsManager(
 
     companion object {
 
-        private const val MODEL_DIR =
-            "supertonic"
+        private const val MODEL_DIR = "supertonic"
 
         private const val DURATION =
             "duration_predictor.int8.onnx"
@@ -37,95 +36,97 @@ class TtsManager(
 
         private const val VOICE =
             "voice.bin"
+
+        /*
+         * 4 steps = faster generation.
+         *
+         * 8 steps = higher quality but slower.
+         *
+         * Supertonic supports changing this value.
+         */
+        const val DEFAULT_STEPS = 4
     }
 
     private var tts: OfflineTts? = null
 
-    private val modelDirectory: String
-        get() =
-            File(
-                context.filesDir,
-                MODEL_DIR
-            ).absolutePath
+    private val cancelled =
+        AtomicBoolean(false)
 
+    @Synchronized
     fun initialize(
-        threads: Int = 2
+        threads: Int = 4
     ) {
 
         if (tts != null) {
             return
         }
 
-        extractModelIfNeeded()
-
-        val modelPath =
-            File(
-                context.filesDir,
-                MODEL_DIR
-            )
+        verifyAssets()
 
         val supertonicConfig =
             OfflineTtsSupertonicModelConfig(
+
                 durationPredictor =
-                    File(
-                        modelPath,
-                        DURATION
-                    ).absolutePath,
+                    "$MODEL_DIR/$DURATION",
 
                 textEncoder =
-                    File(
-                        modelPath,
-                        TEXT_ENCODER
-                    ).absolutePath,
+                    "$MODEL_DIR/$TEXT_ENCODER",
 
                 vectorEstimator =
-                    File(
-                        modelPath,
-                        VECTOR_ESTIMATOR
-                    ).absolutePath,
+                    "$MODEL_DIR/$VECTOR_ESTIMATOR",
 
                 vocoder =
-                    File(
-                        modelPath,
-                        VOCODER
-                    ).absolutePath,
+                    "$MODEL_DIR/$VOCODER",
 
                 ttsJson =
-                    File(
-                        modelPath,
-                        TTS_JSON
-                    ).absolutePath,
+                    "$MODEL_DIR/$TTS_JSON",
 
                 unicodeIndexer =
-                    File(
-                        modelPath,
-                        UNICODE_INDEXER
-                    ).absolutePath,
+                    "$MODEL_DIR/$UNICODE_INDEXER",
 
                 voiceStyle =
-                    File(
-                        modelPath,
-                        VOICE
-                    ).absolutePath
+                    "$MODEL_DIR/$VOICE"
             )
 
         val modelConfig =
             OfflineTtsModelConfig(
-                supertonic = supertonicConfig,
-                numThreads = threads,
+
+                supertonic =
+                    supertonicConfig,
+
+                /*
+                 * More CPU threads can improve speed on
+                 * multi-core Android phones.
+                 *
+                 * 4 is a good default without aggressively
+                 * consuming the CPU.
+                 */
+                numThreads =
+                    threads.coerceIn(
+                        1,
+                        8
+                    ),
+
                 debug = false,
+
                 provider = "cpu"
             )
 
         val config =
             OfflineTtsConfig(
+
                 model = modelConfig,
+
                 maxNumSentences = 1,
+
                 silenceScale = 0.2f
             )
 
         tts =
             OfflineTts(
+                assetManager =
+                    context.assets,
+
                 config = config
             )
     }
@@ -135,7 +136,7 @@ class TtsManager(
         speakerId: Int,
         speed: Float,
         language: String,
-        steps: Int = 8
+        steps: Int = DEFAULT_STEPS
     ): GeneratedResult {
 
         val engine =
@@ -148,26 +149,48 @@ class TtsManager(
             text.trim()
 
         if (cleanText.isEmpty()) {
+
             throw IllegalArgumentException(
                 "Text cannot be empty"
             )
         }
 
+        cancelled.set(false)
+
+        /*
+         * Supertonic has 10 speakers:
+         *
+         * 0,1,2,3,4,5,6,7,8,9
+         */
+        val safeSpeaker =
+            speakerId.coerceIn(
+                0,
+                9
+            )
+
+        val safeSpeed =
+            speed.coerceIn(
+                0.5f,
+                2.0f
+            )
+
+        val safeSteps =
+            steps.coerceIn(
+                1,
+                30
+            )
+
         val generationConfig =
             GenerationConfig(
+
                 silenceScale = 0.2f,
-                speed = speed.coerceIn(
-                    0.1f,
-                    5.0f
-                ),
-                sid = speakerId.coerceIn(
-                    0,
-                    9
-                ),
-                numSteps = steps.coerceIn(
-                    1,
-                    30
-                ),
+
+                speed = safeSpeed,
+
+                sid = safeSpeaker,
+
+                numSteps = safeSteps,
+
                 extra =
                     mapOf(
                         "lang" to language
@@ -175,9 +198,20 @@ class TtsManager(
             )
 
         val audio =
-            engine.generateWithConfig(
-                cleanText,
-                generationConfig
+            engine.generateWithConfigAndCallback(
+
+                text = cleanText,
+
+                config = generationConfig,
+
+                callback = { _ ->
+
+                    if (cancelled.get()) {
+                        0
+                    } else {
+                        1
+                    }
+                }
             )
 
         return GeneratedResult(
@@ -186,131 +220,71 @@ class TtsManager(
         )
     }
 
-    fun release() {
+    fun stop() {
 
-        tts?.release()
-        tts = null
+        cancelled.set(true)
     }
 
-    private fun extractModelIfNeeded() {
+    fun resetStop() {
 
-        val destination =
-            File(
-                context.filesDir,
-                MODEL_DIR
-            )
+        cancelled.set(false)
+    }
 
-        destination.mkdirs()
+    fun release() {
+
+        try {
+
+            tts?.release()
+
+        } finally {
+
+            tts = null
+        }
+    }
+
+    private fun verifyAssets() {
 
         val requiredFiles =
             listOf(
+
                 DURATION,
+
                 TEXT_ENCODER,
+
                 VECTOR_ESTIMATOR,
+
                 VOCODER,
+
                 TTS_JSON,
+
                 UNICODE_INDEXER,
+
                 VOICE
             )
 
-        var complete = true
-
-        for (filename in requiredFiles) {
-
-            val file =
-                File(
-                    destination,
-                    filename
-                )
-
-            if (
-                !file.exists() ||
-                file.length() <= 0
-            ) {
-                complete = false
-                break
-            }
-        }
-
-        if (complete) {
-            return
-        }
-
-        val assetNames =
-            context.assets.list(MODEL_DIR)
+        val files =
+            context.assets.list(
+                MODEL_DIR
+            )
                 ?: throw IllegalStateException(
-                    "Model assets are missing"
+                    "Missing model assets: $MODEL_DIR"
                 )
 
-        for (filename in assetNames) {
+        for (file in requiredFiles) {
 
-            if (!requiredFiles.contains(filename)) {
-                continue
-            }
-
-            val output =
-                File(
-                    destination,
-                    filename
-                )
-
-            context.assets
-                .open(
-                    "$MODEL_DIR/$filename"
-                )
-                .use { input ->
-
-                    output.outputStream()
-                        .use { outputStream ->
-
-                            val buffer =
-                                ByteArray(
-                                    1024 * 1024
-                                )
-
-                            while (true) {
-
-                                val count =
-                                    input.read(buffer)
-
-                                if (count <= 0) {
-                                    break
-                                }
-
-                                outputStream.write(
-                                    buffer,
-                                    0,
-                                    count
-                                )
-                            }
-
-                            outputStream.flush()
-                        }
-                }
-        }
-
-        for (filename in requiredFiles) {
-
-            val file =
-                File(
-                    destination,
-                    filename
-                )
-
-            if (
-                !file.exists() ||
-                file.length() <= 0
-            ) {
+            if (!files.contains(file)) {
 
                 throw IllegalStateException(
-                    "Failed to extract model file: $filename"
+                    "Missing Supertonic model file: $file"
                 )
             }
         }
     }
 
     data class GeneratedResult(
+
         val samples: FloatArray,
+
         val sampleRate: Int
     )
 }
